@@ -23,6 +23,7 @@
 #include <linux/types.h>
 #include <linux/interrupt.h>
 #include <linux/errno.h>
+#include <linux/hrtimer.h>
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
 #include <linux/platform_device.h>
@@ -75,6 +76,10 @@ MODULE_VERSION(HECC_MODULE_VERSION);
 
 #define HECC_MAX_RX_MBOX	(HECC_MAX_MAILBOXES - HECC_MAX_TX_MBOX)
 #define HECC_RX_FIRST_MBOX	(HECC_MAX_MAILBOXES - 1)
+/* Rx interrupt coalescence parameters, hardcode for testing */
+#define HECC_RX_ETHTOOL_RX_MSGS		14
+#define HECC_RX_ETHTOOL_RX_USECS	7000
+
 
 /* TI HECC module registers */
 #define HECC_CANME		0x0	/* Mailbox enable */
@@ -193,6 +198,8 @@ struct ti_hecc_priv {
 	u32 tx_head;
 	u32 tx_tail;
 	struct regulator *reg_xceiver;
+	struct hrtimer rx_timer;
+	ktime_t rx_timer_interval;
 };
 
 static inline int get_tx_head_mb(struct ti_hecc_priv *priv)
@@ -655,13 +662,62 @@ static int ti_hecc_error(struct net_device *ndev, int int_status,
 	return 0;
 }
 
+static int handle_rx(struct ti_hecc_priv *priv)
+{
+	long rx_pending;
+	int ret = 0;
+
+	/* offload RX mailboxes and let NAPI deliver them */
+	while ((rx_pending = hecc_read(priv, HECC_CANRMP))) {
+		ret += can_rx_offload_irq_offload_timestamp(&priv->offload,
+						     rx_pending);
+		hecc_write(priv, HECC_CANRMP, rx_pending);
+	}
+
+	return ret;
+}
+
+static inline struct ti_hecc_priv *rx_timer_to_priv(struct hrtimer *timer)
+{
+	return container_of(timer, struct ti_hecc_priv, rx_timer);
+}
+
+/*
+ * note: this can race with the ti_hecc_interrupt on another cpu, so actually
+ * needs a mutex I think...
+ */
+static enum hrtimer_restart timer_callback(struct hrtimer *timer)
+{
+	struct ti_hecc_priv *priv = rx_timer_to_priv(timer);
+	int msgs_read;
+
+	// todo: try to get the lock otherwise reschedule
+	msgs_read = handle_rx(priv);
+
+	/* non bursty loads, fall back to interrupts */
+	if (msgs_read <= 1) {
+		/* enablable all rx interrupts again */
+		__u32 mask = (~0) << HECC_MB_TX_SHIFT;
+		hecc_set_bit(priv, HECC_CANMIM, mask);
+		// todo: unlock
+		return HRTIMER_NORESTART;
+	}
+
+	// todo: unlock
+	hrtimer_forward_now(timer, priv->rx_timer_interval);
+
+	return HRTIMER_RESTART;
+}
+
+
 static irqreturn_t ti_hecc_interrupt(int irq, void *dev_id)
 {
 	struct net_device *ndev = (struct net_device *)dev_id;
 	struct ti_hecc_priv *priv = netdev_priv(ndev);
 	struct net_device_stats *stats = &ndev->stats;
 	u32 mbxno, mbx_mask, int_status, err_status, stamp;
-	unsigned long flags, rx_pending;
+	unsigned long flags;
+	int msgs_read;
 
 	int_status = hecc_read(priv,
 		(priv->use_hecc1int) ? HECC_CANGIF1 : HECC_CANGIF0);
@@ -700,12 +756,23 @@ static irqreturn_t ti_hecc_interrupt(int irq, void *dev_id)
 		((priv->tx_head & HECC_TX_MASK) == HECC_TX_MASK)))
 			netif_wake_queue(ndev);
 
-		/* offload RX mailboxes and let NAPI deliver them */
-		while ((rx_pending = hecc_read(priv, HECC_CANRMP))) {
-			can_rx_offload_irq_offload_timestamp(&priv->offload,
-							     rx_pending);
-			hecc_write(priv, HECC_CANRMP, rx_pending);
+
+		// todo get lock
+		msgs_read = handle_rx(priv);
+		if (msgs_read) {
+			/*
+			 * Since CAN-bus traffic is typically bursty, don't
+			 * interrupt on the next messages. Either interrupt if
+			 * half of the rx messages are full...
+			 */
+			__u32 mask = (~0) << (32 - HECC_RX_ETHTOOL_RX_MSGS);
+			hecc_clear_bit(priv, HECC_CANMIM, mask);
+
+			/* or read them after a delay */
+			hrtimer_start(&priv->rx_timer, priv->rx_timer_interval,
+				      HRTIMER_MODE_REL_SOFT);
 		}
+		//todo release lock
 	}
 
 	/* clear all interrupt conditions - read back to avoid spurious ints */
@@ -731,6 +798,10 @@ static int ti_hecc_open(struct net_device *ndev)
 		netdev_err(ndev, "error requesting interrupt\n");
 		return err;
 	}
+
+	hrtimer_init(&priv->rx_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL_SOFT);
+	priv->rx_timer.function = timer_callback;
+	priv->rx_timer_interval = ktime_set(0, HECC_RX_ETHTOOL_RX_USECS * 1E3L);
 
 	ti_hecc_transceiver_switch(priv, 1);
 
