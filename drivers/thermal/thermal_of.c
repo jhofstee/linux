@@ -1116,6 +1116,8 @@ int __init of_parse_thermal_zones(void)
 			of_thermal_free_zone(tz);
 			/* attempting to build remaining zones still */
 		}
+
+		zone->device.of_node = of_node_get(child);
 	}
 	of_node_put(np);
 
