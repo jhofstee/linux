@@ -40,6 +40,7 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
+#include <linux/ethtool.h>
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/netdevice.h>
@@ -146,6 +147,10 @@ static const struct net_device_ops vcan_netdev_ops = {
 	.ndo_change_mtu = vcan_change_mtu,
 };
 
+static const struct ethtool_ops vcan_ethtool_ops = {
+	.get_ts_info = ethtool_op_get_ts_info,
+};
+
 static void vcan_setup(struct net_device *dev)
 {
 	dev->type		= ARPHRD_CAN;
@@ -161,6 +166,7 @@ static void vcan_setup(struct net_device *dev)
 		dev->flags |= IFF_ECHO;
 
 	dev->netdev_ops		= &vcan_netdev_ops;
+	dev->ethtool_ops	= &vcan_ethtool_ops;
 	dev->needs_free_netdev	= true;
 }
 
