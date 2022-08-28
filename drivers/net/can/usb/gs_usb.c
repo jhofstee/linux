@@ -354,7 +354,7 @@ static int gs_cmd_reset(struct gs_can *gsdev)
 static void gs_update_state(struct gs_can *dev, struct can_frame *cf)
 {
 	struct can_device_stats *can_stats = &dev->can.can_stats;
-	enum can_state new_state;
+	enum can_state new_state, old_state;
 
 	if (cf->can_id & CAN_ERR_RESTARTED) {
 		dev->can.state = CAN_STATE_ERROR_ACTIVE;
@@ -382,7 +382,14 @@ static void gs_update_state(struct gs_can *dev, struct can_frame *cf)
 
 	can_update_state_error_stats(dev->netdev, new_state);
 	
+	old_state = dev->can.state;
 	dev->can.state = new_state;
+	
+	if (old_state == CAN_STATE_BUS_OFF && dev->can.restart_ms)
+		cancel_delayed_work_sync(&dev->can.restart_work);
+
+	if (new_state == CAN_STATE_BUS_OFF)
+		can_bus_off(dev->netdev);
 }
 
 static void gs_usb_receive_bulk_callback(struct urb *urb)
@@ -875,6 +882,21 @@ static int gs_can_open(struct net_device *netdev)
 	return 0;
 }
 
+static int gs_usb_set_mode(struct net_device *netdev, enum can_mode mode)
+{
+	struct gs_can *dev = netdev_priv(netdev);
+	int ret;
+	
+	if (mode == CAN_MODE_START) {
+		ret = gs_usb_start(netdev);
+		if (ret == 0 && !(dev->can.ctrlmode & CAN_CTRLMODE_LISTENONLY))
+			netif_wake_queue(netdev);
+		return ret;
+	}
+
+	return -EOPNOTSUPP;
+}
+
 static int gs_can_close(struct net_device *netdev)
 {
 	int rc;
@@ -1049,6 +1071,7 @@ static struct gs_can *gs_make_candev(unsigned int channel,
 	dev->can.clock.freq = le32_to_cpu(bt_const->fclk_can);
 	dev->can.bittiming_const = &dev->bt_const;
 	dev->can.do_set_bittiming = gs_usb_set_bittiming;
+	dev->can.do_set_mode = gs_usb_set_mode;
 
 	dev->can.ctrlmode_supported = CAN_CTRLMODE_CC_LEN8_DLC;
 
