@@ -52,6 +52,7 @@ enum gs_usb_breq {
 	GS_USB_BREQ_SET_USER_ID,
 	GS_USB_BREQ_DATA_BITTIMING,
 	GS_USB_BREQ_BT_CONST_EXT,
+	CG_USB_BREQ_STATE,
 };
 
 enum gs_can_mode {
@@ -112,6 +113,7 @@ struct gs_device_config {
 /* GS_CAN_FEATURE_REQ_USB_QUIRK_LPC546XX BIT(9) */
 /* GS_CAN_FEATURE_BT_CONST_EXT BIT(10) */
 #define GS_CAN_MODE_BERR_REPORTING BIT(11)
+/* GS_CAN_FEATURE_GET_STATE BIT(12) */
 
 struct gs_device_mode {
 	__le32 mode;
@@ -148,7 +150,8 @@ struct gs_identify_mode {
 #define GS_CAN_FEATURE_REQ_USB_QUIRK_LPC546XX BIT(9)
 #define GS_CAN_FEATURE_BT_CONST_EXT BIT(10)
 #define GS_CAN_FEATURE_BERR_REPORTING BIT(11)
-#define GS_CAN_FEATURE_MASK GENMASK(11, 0)
+#define GS_CAN_FEATURE_GET_STATE BIT(12)
+#define GS_CAN_FEATURE_MASK GENMASK(12, 0)
 
 /* internal quirks - keep in GS_CAN_FEATURE space for now */
 
@@ -902,6 +905,46 @@ static int gs_usb_set_mode(struct net_device *netdev, enum can_mode mode)
 	return -EOPNOTSUPP;
 }
 
+static int gs_can_get_dev_state(const struct net_device *netdev,
+				enum can_state *state,
+				struct can_berr_counter *bec)
+{
+	struct gs_can *dev = netdev_priv(netdev);
+	struct gs_device_state ds;
+	int rc;
+
+	rc = usb_control_msg_recv(interface_to_usbdev(dev->iface),
+				  usb_sndctrlpipe(interface_to_usbdev(dev->iface), 0),
+				  CG_USB_BREQ_STATE,
+				  USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_INTERFACE,
+				  dev->channel, 0,
+				  &ds, sizeof(ds),
+				  USB_CTRL_GET_TIMEOUT,
+				  GFP_KERNEL);
+
+	if (rc < 0) {
+		netdev_err(netdev, "Couldn't get device state (err=%d)\n", rc);
+		return rc;
+	}
+
+	if (ds.state >= CAN_STATE_MAX)
+		return -EOPNOTSUPP;
+
+	*state = ds.state;
+	bec->txerr = ds.txerr;
+	bec->rxerr = ds.rxerr;
+
+	return 0;
+}
+
+static int gs_can_get_berr_counter(const struct net_device *netdev,
+				   struct can_berr_counter *bec)
+{
+	enum can_state state;
+
+	return gs_can_get_dev_state(netdev, &state, bec);
+}
+
 static int gs_can_close(struct net_device *netdev)
 {
 	int rc;
@@ -1105,6 +1148,9 @@ static struct gs_can *gs_make_candev(unsigned int channel,
 
 	if (feature & GS_CAN_FEATURE_BERR_REPORTING)
 		dev->can.ctrlmode_supported |= CAN_CTRLMODE_BERR_REPORTING;
+
+	if (feature & GS_CAN_FEATURE_GET_STATE)
+		dev->can.do_get_berr_counter = gs_can_get_berr_counter;
 
 	/* The CANtact Pro from LinkLayer Labs is based on the
 	 * LPC54616 µC, which is affected by the NXP LPC USB transfer
