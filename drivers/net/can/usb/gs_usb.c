@@ -711,12 +711,64 @@ static netdev_tx_t gs_can_start_xmit(struct sk_buff *skb,
 	return NETDEV_TX_OK;
 }
 
+static int gs_usb_start(struct net_device *netdev)
+{
+	struct gs_device_mode *dm = kmalloc(sizeof(*dm), GFP_KERNEL);
+	struct gs_can *dev = netdev_priv(netdev);
+	u32 ctrlmode;
+	int rc;
+
+	if (!dm)
+		return -ENOMEM;
+
+	/* flags */
+	ctrlmode = dev->can.ctrlmode;
+	dm->flags = 0;
+
+	if (ctrlmode & CAN_CTRLMODE_LOOPBACK)
+		dm->flags |= GS_CAN_MODE_LOOP_BACK;
+	else if (ctrlmode & CAN_CTRLMODE_LISTENONLY)
+		dm->flags |= GS_CAN_MODE_LISTEN_ONLY;
+
+	/* Controller is not allowed to retry TX
+	 * this mode is unavailable on atmels uc3c hardware
+	 */
+	if (ctrlmode & CAN_CTRLMODE_ONE_SHOT)
+		dm->flags |= GS_CAN_MODE_ONE_SHOT;
+
+	if (ctrlmode & CAN_CTRLMODE_3_SAMPLES)
+		dm->flags |= GS_CAN_MODE_TRIPLE_SAMPLE;
+
+	/* finally start device */
+	dm->mode = GS_CAN_MODE_START;
+	rc = usb_control_msg(interface_to_usbdev(dev->iface),
+			     usb_sndctrlpipe(interface_to_usbdev(dev->iface), 0),
+			     GS_USB_BREQ_MODE,
+			     USB_DIR_OUT|USB_TYPE_VENDOR|USB_RECIP_INTERFACE,
+			     dev->channel,
+			     0,
+			     dm,
+			     sizeof(*dm),
+			     1000);
+
+	if (rc < 0) {
+		netdev_err(netdev, "Couldn't start device (err=%d)\n", rc);
+		kfree(dm);
+		return rc;
+	}
+
+	kfree(dm);
+
+	dev->can.state = CAN_STATE_ERROR_ACTIVE;
+
+	return 0;
+}
+
 static int gs_can_open(struct net_device *netdev)
 {
 	struct gs_can *dev = netdev_priv(netdev);
 	struct gs_usb *parent = dev->parent;
 	int rc, i;
-	struct gs_device_mode *dm;
 	struct gs_host_frame *hf;
 	u32 ctrlmode;
 	u32 flags = 0;
@@ -804,45 +856,10 @@ static int gs_can_open(struct net_device *netdev)
 		}
 	}
 
-	dm = kmalloc(sizeof(*dm), GFP_KERNEL);
-	if (!dm)
-		return -ENOMEM;
-
-	/* flags */
-	if (ctrlmode & CAN_CTRLMODE_LOOPBACK)
-		flags |= GS_CAN_MODE_LOOP_BACK;
-	else if (ctrlmode & CAN_CTRLMODE_LISTENONLY)
-		flags |= GS_CAN_MODE_LISTEN_ONLY;
-
-	/* Controller is not allowed to retry TX
-	 * this mode is unavailable on atmels uc3c hardware
-	 */
-	if (ctrlmode & CAN_CTRLMODE_ONE_SHOT)
-		flags |= GS_CAN_MODE_ONE_SHOT;
-
-	if (ctrlmode & CAN_CTRLMODE_3_SAMPLES)
-		flags |= GS_CAN_MODE_TRIPLE_SAMPLE;
-
-	/* finally start device */
-	dm->mode = cpu_to_le32(GS_CAN_MODE_START);
-	dm->flags = cpu_to_le32(flags);
-	rc = usb_control_msg(interface_to_usbdev(dev->iface),
-			     usb_sndctrlpipe(interface_to_usbdev(dev->iface), 0),
-			     GS_USB_BREQ_MODE,
-			     USB_DIR_OUT | USB_TYPE_VENDOR | USB_RECIP_INTERFACE,
-			     dev->channel, 0, dm, sizeof(*dm), 1000);
-
-	if (rc < 0) {
-		netdev_err(netdev, "Couldn't start device (err=%d)\n", rc);
-		kfree(dm);
+	rc = gs_usb_start(netdev);
+	if (rc < 0)
 		return rc;
-	}
 
-	kfree(dm);
-
-	dev->can.state = CAN_STATE_ERROR_ACTIVE;
-
-	parent->active_channels++;
 	if (!(dev->can.ctrlmode & CAN_CTRLMODE_LISTENONLY))
 		netif_start_queue(netdev);
 
