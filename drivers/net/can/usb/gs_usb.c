@@ -111,6 +111,7 @@ struct gs_device_config {
 #define GS_CAN_MODE_FD BIT(8)
 /* GS_CAN_FEATURE_REQ_USB_QUIRK_LPC546XX BIT(9) */
 /* GS_CAN_FEATURE_BT_CONST_EXT BIT(10) */
+#define GS_CAN_MODE_BERR_REPORTING BIT(11)
 
 struct gs_device_mode {
 	__le32 mode;
@@ -146,7 +147,8 @@ struct gs_identify_mode {
 #define GS_CAN_FEATURE_FD BIT(8)
 #define GS_CAN_FEATURE_REQ_USB_QUIRK_LPC546XX BIT(9)
 #define GS_CAN_FEATURE_BT_CONST_EXT BIT(10)
-#define GS_CAN_FEATURE_MASK GENMASK(10, 0)
+#define GS_CAN_FEATURE_BERR_REPORTING BIT(11)
+#define GS_CAN_FEATURE_MASK GENMASK(11, 0)
 
 /* internal quirks - keep in GS_CAN_FEATURE space for now */
 
@@ -755,6 +757,9 @@ static int gs_usb_start(struct net_device *netdev)
 	if (ctrlmode & CAN_CTRLMODE_3_SAMPLES)
 		dm->flags |= GS_CAN_MODE_TRIPLE_SAMPLE;
 
+	if (ctrlmode & CAN_CTRLMODE_BERR_REPORTING)
+		dm->flags |= GS_CAN_MODE_BERR_REPORTING;
+
 	/* finally start device */
 	dm->mode = GS_CAN_MODE_START;
 	rc = usb_control_msg(interface_to_usbdev(dev->iface),
@@ -1097,6 +1102,9 @@ static struct gs_can *gs_make_candev(unsigned int channel,
 		dev->can.data_bittiming_const = &dev->bt_const;
 		dev->can.do_set_data_bittiming = gs_usb_set_data_bittiming;
 	}
+
+	if (feature & GS_CAN_FEATURE_BERR_REPORTING)
+		dev->can.ctrlmode_supported |= CAN_CTRLMODE_BERR_REPORTING;
 
 	/* The CANtact Pro from LinkLayer Labs is based on the
 	 * LPC54616 µC, which is affected by the NXP LPC USB transfer
