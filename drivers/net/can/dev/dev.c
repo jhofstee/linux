@@ -23,7 +23,7 @@ MODULE_DESCRIPTION(MOD_DESC);
 MODULE_LICENSE("GPL v2");
 MODULE_AUTHOR("Wolfgang Grandegger <wg@grandegger.com>");
 
-static void can_update_state_error_stats(struct net_device *dev,
+void can_update_state_error_stats(struct net_device *dev,
 					 enum can_state new_state)
 {
 	struct can_priv *priv = netdev_priv(dev);
@@ -45,6 +45,7 @@ static void can_update_state_error_stats(struct net_device *dev,
 		break;
 	}
 }
+EXPORT_SYMBOL_GPL(can_update_state_error_stats);
 
 static int can_tx_state_to_frame(struct net_device *dev, enum can_state state)
 {

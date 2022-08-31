@@ -172,6 +172,8 @@ void can_bus_off(struct net_device *dev);
 const char *can_get_state_str(const enum can_state state);
 void can_change_state(struct net_device *dev, struct can_frame *cf,
 		      enum can_state tx_state, enum can_state rx_state);
+void can_update_state_error_stats(struct net_device *dev,
+					 enum can_state new_state);
 
 #ifdef CONFIG_OF
 void of_can_transceiver(struct net_device *dev);
